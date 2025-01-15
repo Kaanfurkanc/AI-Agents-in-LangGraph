@@ -1,76 +1,78 @@
 import openai
-import re
-import httpx
-import os
 from dotenv import load_dotenv, find_dotenv
-
 
 _ = load_dotenv(find_dotenv())
 
-from openai import OpenAI
-openai.api_key = os.getenv("OPENAI_API_KEY")
+from langgraph.graph import StateGraph, END
+from typing import TypedDict, Annotated
+import operator
+from langchain_core.messages import AnyMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from langchain_community.tools.tavily_search import TavilySearchResults
 
-client = OpenAI()
-chat_completion = client.chat.completions.create(
-    model="gpt-3.5-turbo",
-    messages=[
-        {"role": "user", "content": "Hello, who are you?"},
-    ],
-)
+tool = TavilySearchResults(max_results=2)
+print(type(tool))
+print(tool.name)
 
-print(chat_completion.choices[0].message.content)
+class AgentState(TypedDict):
+    messages: Annotated[list[AnyMessage], operator.add]
 
-class Agent:
-    def __init__(self, system="") :
+class Agent():
+
+    def __init__(self, model, tools, system=""):
         self.system = system
-        self.messages = []
-        if self.system:
-            self.messages.append({"role": "system", "content": self.system})
-
-    def __call__(self, message):
-        self.messages.append({"role": "user", "content": message})
-        response = self.execute()
-        self.messages.append({"role": "assistant", "content": response})
-        return response
-    
-    def execute(self):
-        completion = client.chat.completions.create(
-            model="gpt-4-0125-preview",
-            temperature=0,
-            messages=self.messages,
+        graph = StateGraph(AgentState)
+        graph.add_node("llm", self.call_openai)
+        graph.add_node("action", self.take_action)
+        graph.add_conditional_edges(
+            "llm",
+            self.exists_action,
+            {True:"action", False: END}
         )
-        return completion.choices[0].message.content
+        graph.add_edge("action", "llm")
+        graph.set_entry_point("llm")
+        # Compile graph when all requirent setups is completed. It's for tailored to runnable by langchain.
+        self.graph = graph.compile()
+        self.tools = {t.name: t for t in tools}
+        self.model = model.bind_tools(tools)
 
-#ReACT Pattern
-prompt = """
-You run in a loop of Thought, Action, PAUSE, Observation.
-At the end of the loop you output an Answer
-Use Thought to describe your thoughts about the question you have been asked.
-Use Action to run one of the actions available to you - then return PAUSE.
-Observation will be the result of running those actions.
 
-Your available actions are:
 
-calculate:
-e.g. calculate: 4 * 7 / 3
-Runs a calculation and returns the number - uses Python so be sure to use floating point syntax if necessary
+    def call_openai(self, state: AgentState):
+        messages = state['messages']
+        if self.system:
+            messages = [SystemMessage(self.system)] + messages
+        message = self.model.invoke(messages)
+        return {"messages": message}
 
-average_dog_weight:
-e.g. average_dog_weight: Collie
-returns average weight of a dog when given the breed
+    def take_action(self, state: AgentState):
+        tool_calls = state['messages'][-1].tool_calls
+        results = []
 
-Example session:
+        for t in tool_calls:
+            print(f"Calling .. {t}")
+            if t["name"] not in self.tools:
+                print("\n ....bad tool name....")
+                result = "bad tool name, retry"
+            else:
+                result = self.tools[t['name']].invoke(t['args'])
+                results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
+        print("Back to the model!")
+        return {"messages": results}
 
-Question: How much does a Bulldog weigh?
-Thought: I should look the dogs weight using average_dog_weight
-Action: average_dog_weight: Bulldog
-PAUSE
 
-You will be called again with this:
+    def exists_action(self, state: AgentState):
+        result = state['messages'][-1]
+        return len(result.tool_calls) > 0
 
-Observation: A Bulldog weights 51 lbs
 
-You then output:
 
-Answer: A bulldog weights 51 lbs
-""".strip()
+system_prompt = """You are a smart research assistant. Use the search engine to look up information. \
+You are allowed to make multiple calls (either together or in sequence). \
+Only look up information when you are sure of what you want. \
+If you need to look up some information before asking a follow up question, you are allowed to do that!
+"""
+
+model = ChatOpenAI(model="gpt-3.5-turbo")  #reduce inference cost
+abot = Agent(model, [tool], system=system_prompt)
+

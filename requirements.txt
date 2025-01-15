@@ -3,3 +3,5 @@ httpx==0.28.1
 python-dotenv==1.0.1
 langchain==0.3.14
 langgraph==0.2.61
+langchain_openai==0.3.0
+langchain_community==0.3.14
