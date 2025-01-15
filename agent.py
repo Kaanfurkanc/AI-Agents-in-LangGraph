@@ -36,8 +36,6 @@ class Agent():
         self.tools = {t.name: t for t in tools}
         self.model = model.bind_tools(tools)
 
-
-
     def call_openai(self, state: AgentState):
         messages = state['messages']
         if self.system:
@@ -59,7 +57,6 @@ class Agent():
                 results.append(ToolMessage(tool_call_id=t['id'], name=t['name'], content=str(result)))
         print("Back to the model!")
         return {"messages": results}
-
 
     def exists_action(self, state: AgentState):
         result = state['messages'][-1]
